@@ -147,3 +147,6 @@ Note: you'll need to change the path in programes.
 
 ## Contact
 Please post a Github issue if you have any questions. Welcome to discuss new ideas, techniques, and improvements!
+
+## Buy Me a Coffee
+If you find it useful and want to say thanks, I'd appreciate it if you bought me a coffee! It helps keep the motivation and the energy high!
