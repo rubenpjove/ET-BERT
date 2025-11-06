@@ -36,6 +36,7 @@ Table of Contents
   * [Reproduce ET-BERT](#reproduce-et-bert)
   * [Citation](#citation)
   * [Contact](#contact)
+  * [Sponsor](#buymeacoffee)
 <br/>
 
 ## Requirements
