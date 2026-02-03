@@ -3,6 +3,7 @@ This script provides an exmaple to wrap UER-py for classification.
 """
 import random
 import argparse
+from pathlib import Path
 import torch
 import torch.nn as nn
 from uer.layers import *
@@ -224,9 +225,13 @@ def evaluate(args, dataset, print_confusion_matrix=False):
         print("Confusion matrix:")
         print(confusion)
         cf_array = confusion.numpy()
-        with open("/data2/lxj/pre-train/results/confusion_matrix",'w') as f:
+        # Write confusion matrix into configured artifacts directory (falls back to CWD).
+        output_dir = Path(getattr(args, "artifacts_output_path", None) or ".")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        cm_path = output_dir / "confusion_matrix"
+        with cm_path.open("w") as f:
             for cf_a in cf_array:
-                f.write(str(cf_a)+'\n')
+                f.write(str(cf_a) + "\n")
         print("Report precision, recall, and f1:")
         eps = 1e-9
         for i in range(confusion.size()[0]):
@@ -261,6 +266,12 @@ def main():
                         help="Train model with logits.")
     parser.add_argument("--soft_alpha", type=float, default=0.5,
                         help="Weight of the soft targets loss.")
+    parser.add_argument(
+        "--artifacts_output_path",
+        type=str,
+        default=None,
+        help="Directory where confusion matrix and other artifacts will be stored.",
+    )
     
     args = parser.parse_args()
 

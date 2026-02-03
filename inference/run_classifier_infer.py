@@ -1,5 +1,5 @@
 """
-  This script provides an exmaple to wrap UER-py for classification inference.
+  This script provides an example to wrap UER-py for classification inference.
 """
 import sys
 import os
@@ -8,8 +8,14 @@ import argparse
 import collections
 import torch.nn as nn
 
-uer_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+current_dir = os.path.dirname(__file__)
+uer_dir = os.path.abspath(os.path.join(current_dir, ".."))
 sys.path.append(uer_dir)
+
+# Ensure we can import the fine-tuning classifier implementation.
+fine_tuning_dir = os.path.abspath(os.path.join(uer_dir, "fine-tuning"))
+if fine_tuning_dir not in sys.path:
+    sys.path.append(fine_tuning_dir)
 
 from uer.utils.constants import *
 from uer.utils import *
