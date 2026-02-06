@@ -82,8 +82,9 @@ def count_labels_num(path):
 
 def load_or_initialize_parameters(args, model):
     if args.pretrained_model_path is not None:
-        # Initialize with pretrained model.
-        model.load_state_dict(torch.load(args.pretrained_model_path, map_location={'cuda:1':'cuda:0', 'cuda:2':'cuda:0', 'cuda:3':'cuda:0'}), strict=False)
+        # Initialize with pretrained model. Map to CPU when CUDA is not available.
+        map_location = "cpu" if not torch.cuda.is_available() else {"cuda:1": "cuda:0", "cuda:2": "cuda:0", "cuda:3": "cuda:0"}
+        model.load_state_dict(torch.load(args.pretrained_model_path, map_location=map_location), strict=False)
     else:
         # Initialize with normal distribution.
         for n, p in list(model.named_parameters()):
