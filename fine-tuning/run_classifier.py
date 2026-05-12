@@ -1,6 +1,7 @@
 """
 This script provides an exmaple to wrap UER-py for classification.
 """
+import os
 import random
 import argparse
 from pathlib import Path
@@ -332,18 +333,44 @@ def main():
 
     total_loss, result, best_result = 0.0, 0.0, 0.0
 
+    # MLflow per-epoch logging via MlflowClient (no active run needed in subprocess)
+    _mlflow_client = None
+    _mlflow_run_id = os.environ.get("MLFLOW_RUN_ID")
+    if _mlflow_run_id:
+        try:
+            import mlflow
+            _mlflow_tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
+            if _mlflow_tracking_uri:
+                mlflow.set_tracking_uri(_mlflow_tracking_uri)
+            _mlflow_client = mlflow.tracking.MlflowClient()
+        except Exception:
+            pass
+
     print("Start training.")
 
     for epoch in tqdm.tqdm(range(1, args.epochs_num + 1)):
         model.train()
+        epoch_loss, epoch_steps = 0.0, 0
         for i, (src_batch, tgt_batch, seg_batch, soft_tgt_batch) in enumerate(batch_loader(batch_size, src, tgt, seg, soft_tgt)):
             loss = train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_batch, soft_tgt_batch)
-            total_loss += loss.item()
+            loss_val = loss.item()
+            total_loss += loss_val
+            epoch_loss += loss_val
+            epoch_steps += 1
             if (i + 1) % args.report_steps == 0:
                 print("Epoch id: {}, Training steps: {}, Avg loss: {:.3f}".format(epoch, i + 1, total_loss / args.report_steps))
                 total_loss = 0.0
 
         result = evaluate(args, read_dataset(args, args.dev_path))
+
+        if _mlflow_client and _mlflow_run_id:
+            try:
+                avg_loss = epoch_loss / epoch_steps if epoch_steps > 0 else 0.0
+                _mlflow_client.log_metric(_mlflow_run_id, "train.loss", avg_loss, step=epoch)
+                _mlflow_client.log_metric(_mlflow_run_id, "dev.accuracy", result[0], step=epoch)
+            except Exception:
+                pass
+
         if result[0] > best_result:
             best_result = result[0]
             save_model(model, args.output_model_path)
