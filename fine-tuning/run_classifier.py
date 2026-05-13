@@ -331,7 +331,7 @@ def main():
         model = torch.nn.DataParallel(model)
     args.model = model
 
-    total_loss, result, best_result = 0.0, 0.0, 0.0
+    total_loss, result, best_result = 0.0, 0.0, -1.0
 
     # MLflow per-epoch logging via MlflowClient (no active run needed in subprocess)
     _mlflow_client = None
