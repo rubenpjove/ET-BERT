@@ -333,15 +333,27 @@ def main():
 
     total_loss, result, best_result = 0.0, 0.0, -1.0
 
-    # MLflow per-epoch logging via MlflowClient (no active run needed in subprocess)
+    # MLflow integration: re-enter the parent's active run so autolog and
+    # per-epoch metrics are written to the same run on the shared Lustre store.
     _mlflow_client = None
     _mlflow_run_id = os.environ.get("MLFLOW_RUN_ID")
     if _mlflow_run_id:
         try:
+            import atexit
             import mlflow
+            import mlflow.pytorch
             _mlflow_tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
             if _mlflow_tracking_uri:
                 mlflow.set_tracking_uri(_mlflow_tracking_uri)
+            # Re-enter the parent process's run (same run_id, shared Lustre mlruns/).
+            mlflow.start_run(run_id=_mlflow_run_id)
+            # Prevent this subprocess from closing the run on exit — the parent
+            # process owns the run lifecycle and will call end_run() itself.
+            atexit.unregister(mlflow.end_run)
+            # Autolog: patches optimizer.step() to capture learning-rate schedule
+            # and gradient norms each step. log_models=False avoids uploading the
+            # .bin checkpoint as a large MLflow artifact (we manage paths manually).
+            mlflow.pytorch.autolog(log_models=False, silent=True)
             _mlflow_client = mlflow.tracking.MlflowClient()
         except Exception as e:
             print(f"[WARNING] MLflow per-epoch logging disabled: {e}")
