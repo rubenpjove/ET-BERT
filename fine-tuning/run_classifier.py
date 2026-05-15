@@ -343,8 +343,8 @@ def main():
             if _mlflow_tracking_uri:
                 mlflow.set_tracking_uri(_mlflow_tracking_uri)
             _mlflow_client = mlflow.tracking.MlflowClient()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARNING] MLflow per-epoch logging disabled: {e}")
 
     print("Start training.")
 
