@@ -249,6 +249,26 @@ def evaluate(args, dataset, print_confusion_matrix=False):
     return correct / len(dataset), confusion
 
 
+def macro_f1_from_confusion(confusion):
+    """Macro-averaged F1 from a [pred, gold] confusion matrix.
+
+    Averaged over all `labels_num` classes (classes absent from the predictions
+    contribute F1=0), matching sklearn's f1_score(average="macro") over the full
+    label set. Used for best-on-dev model selection so the protocol matches the
+    netFound side (which selects on eval_f1_macro)."""
+    eps = 1e-9
+    n = confusion.size()[0]
+    if n == 0:
+        return 0.0
+    f1_total = 0.0
+    for i in range(n):
+        tp = confusion[i, i].item()
+        p = tp / (confusion[i, :].sum().item() + eps)
+        r = tp / (confusion[:, i].sum().item() + eps)
+        f1_total += 0.0 if (p + r) == 0 else (2 * p * r / (p + r))
+    return f1_total / n
+
+
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
@@ -274,7 +294,14 @@ def main():
         default=None,
         help="Directory where confusion matrix and other artifacts will be stored.",
     )
-    
+    parser.add_argument(
+        "--selection_metric",
+        choices=["accuracy", "f1_macro"],
+        default="f1_macro",
+        help="Dev-set metric used to select the best epoch's checkpoint (best-on-dev). "
+             "Kept consistent across NTFMs for a fair comparison (default: f1_macro).",
+    )
+
     args = parser.parse_args()
 
     # Load the hyperparameters from the config file.
@@ -331,7 +358,7 @@ def main():
         model = torch.nn.DataParallel(model)
     args.model = model
 
-    total_loss, result, best_result = 0.0, 0.0, -1.0
+    total_loss, best_result = 0.0, -1.0
 
     # MLflow integration: re-enter the parent's active run so autolog and
     # per-epoch metrics are written to the same run on the shared Lustre store.
@@ -373,18 +400,22 @@ def main():
                 print("Epoch id: {}, Training steps: {}, Avg loss: {:.3f}".format(epoch, i + 1, total_loss / args.report_steps))
                 total_loss = 0.0
 
-        result = evaluate(args, read_dataset(args, args.dev_path))
+        dev_accuracy, dev_confusion = evaluate(args, read_dataset(args, args.dev_path))
+        dev_f1_macro = macro_f1_from_confusion(dev_confusion)
+        selection_score = dev_f1_macro if args.selection_metric == "f1_macro" else dev_accuracy
 
         if _mlflow_client and _mlflow_run_id:
             try:
                 avg_loss = epoch_loss / epoch_steps if epoch_steps > 0 else 0.0
                 _mlflow_client.log_metric(_mlflow_run_id, "train.loss", avg_loss, step=epoch)
-                _mlflow_client.log_metric(_mlflow_run_id, "dev.accuracy", result[0], step=epoch)
+                _mlflow_client.log_metric(_mlflow_run_id, "dev.accuracy", dev_accuracy, step=epoch)
+                _mlflow_client.log_metric(_mlflow_run_id, "dev.f1_macro", dev_f1_macro, step=epoch)
             except Exception:
                 pass
 
-        if result[0] > best_result:
-            best_result = result[0]
+        # Best-on-dev model selection by the configured metric (default f1_macro).
+        if selection_score > best_result:
+            best_result = selection_score
             save_model(model, args.output_model_path)
 
     # Evaluation phase.
