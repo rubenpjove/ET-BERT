@@ -206,6 +206,7 @@ def evaluate(args, dataset, print_confusion_matrix=False):
     batch_size = args.batch_size
 
     correct = 0
+    loss_sum, n_seen = 0.0, 0
     # Confusion matrix.
     confusion = torch.zeros(args.labels_num, args.labels_num, dtype=torch.long)
 
@@ -216,7 +217,14 @@ def evaluate(args, dataset, print_confusion_matrix=False):
         tgt_batch = tgt_batch.to(args.device)
         seg_batch = seg_batch.to(args.device)
         with torch.no_grad():
-            _, logits = args.model(src_batch, tgt_batch, seg_batch)
+            loss, logits = args.model(src_batch, tgt_batch, seg_batch)
+        # The model returns the mean CE loss over the batch (NLLLoss, reduction='mean';
+        # a vector under DataParallel — hence .mean()). Weight by batch size to recover
+        # the dataset-mean dev loss for best-on-dev selection by `loss` (parity with
+        # netFound's eval_loss).
+        bsz = tgt_batch.size(0)
+        loss_sum += float(loss.mean().item()) * bsz
+        n_seen += bsz
         pred = torch.argmax(nn.Softmax(dim=1)(logits), dim=1)
         gold = tgt_batch
         for j in range(pred.size()[0]):
@@ -246,7 +254,8 @@ def evaluate(args, dataset, print_confusion_matrix=False):
             print("Label {}: {:.3f}, {:.3f}, {:.3f}".format(i, p, r, f1))
 
     print("Acc. (Correct/Total): {:.4f} ({}/{}) ".format(correct / len(dataset), correct, len(dataset)))
-    return correct / len(dataset), confusion
+    avg_loss = loss_sum / n_seen if n_seen > 0 else 0.0
+    return correct / len(dataset), confusion, avg_loss
 
 
 def macro_f1_from_confusion(confusion):
@@ -296,10 +305,12 @@ def main():
     )
     parser.add_argument(
         "--selection_metric",
-        choices=["accuracy", "f1_macro"],
+        choices=["accuracy", "f1_macro", "loss"],
         default="f1_macro",
         help="Dev-set metric used to select the best epoch's checkpoint (best-on-dev). "
-             "Kept consistent across NTFMs for a fair comparison (default: f1_macro).",
+             "'loss' picks the minimum dev cross-entropy (uses the full probability mass "
+             "→ lower selection variance than the thresholded f1_macro). Kept consistent "
+             "across NTFMs for a fair comparison (default: f1_macro).",
     )
 
     args = parser.parse_args()
@@ -358,7 +369,9 @@ def main():
         model = torch.nn.DataParallel(model)
     args.model = model
 
-    total_loss, best_result = 0.0, -1.0
+    # -inf so the first epoch always saves, regardless of metric sign (in particular the
+    # negated dev loss, which can be < -1).
+    total_loss, best_result = 0.0, float("-inf")
 
     # MLflow integration: re-enter the parent's active run so autolog and
     # per-epoch metrics are written to the same run on the shared Lustre store.
@@ -400,9 +413,16 @@ def main():
                 print("Epoch id: {}, Training steps: {}, Avg loss: {:.3f}".format(epoch, i + 1, total_loss / args.report_steps))
                 total_loss = 0.0
 
-        dev_accuracy, dev_confusion = evaluate(args, read_dataset(args, args.dev_path))
+        dev_accuracy, dev_confusion, dev_loss = evaluate(args, read_dataset(args, args.dev_path))
         dev_f1_macro = macro_f1_from_confusion(dev_confusion)
-        selection_score = dev_f1_macro if args.selection_metric == "f1_macro" else dev_accuracy
+        # Higher-is-better selection score. For `loss` we negate the dev loss so the same
+        # argmax-style comparison below picks the MINIMUM dev loss.
+        if args.selection_metric == "f1_macro":
+            selection_score = dev_f1_macro
+        elif args.selection_metric == "loss":
+            selection_score = -dev_loss
+        else:
+            selection_score = dev_accuracy
 
         if _mlflow_client and _mlflow_run_id:
             try:
@@ -410,6 +430,7 @@ def main():
                 _mlflow_client.log_metric(_mlflow_run_id, "train.loss", avg_loss, step=epoch)
                 _mlflow_client.log_metric(_mlflow_run_id, "dev.accuracy", dev_accuracy, step=epoch)
                 _mlflow_client.log_metric(_mlflow_run_id, "dev.f1_macro", dev_f1_macro, step=epoch)
+                _mlflow_client.log_metric(_mlflow_run_id, "dev.loss", dev_loss, step=epoch)
             except Exception:
                 pass
 
