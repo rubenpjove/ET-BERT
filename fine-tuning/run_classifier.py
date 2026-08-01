@@ -320,6 +320,17 @@ def main():
 
     set_seed(args.seed)
 
+    # Opt-in single-run bit-reproducibility: the osfing pipeline sets
+    # OSFING_DETERMINISTIC=1 (--param training.deterministic=true); no-op otherwise.
+    # use_deterministic_algorithms raises on ops without a deterministic kernel —
+    # intentional (a silent fallback would defeat the purpose). Slows training and
+    # does not remove cross-node/GPU variance.
+    if os.environ.get("OSFING_DETERMINISTIC") == "1":
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
+        print("Deterministic mode ON (torch.use_deterministic_algorithms, cuDNN benchmark off)")
+
     # Count the number of labels.
     args.labels_num = count_labels_num(args.train_path)
 
