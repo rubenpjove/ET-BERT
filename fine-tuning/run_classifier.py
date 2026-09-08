@@ -389,8 +389,7 @@ def main():
 
     # Per-epoch metrics channel for the NTFM-OSfing pipeline. When the parent process sets
     # OSFING_EPOCH_LOG, one record per epoch (plus a final {"kind": "summary"} record) is
-    # appended to that file as a YAML sequence item in flow style — `- ` + JSON, which is a
-    # YAML subset — with flush + fsync per line, so a killed job keeps every finished epoch.
+    # appended to that file as JSON Lines (one JSON object per line) with flush + fsync per line, so a killed job keeps every finished epoch.
     # Metric names (train.loss / dev.accuracy / dev.f1_macro / dev.loss, 1-based epoch) match
     # the netFound fork's EpochLogCallback. Dependency-free; no env var -> no-op.
     _epoch_log_path = os.environ.get("OSFING_EPOCH_LOG")
@@ -404,7 +403,7 @@ def main():
                 for k, v in record.items()
             }
             with open(_epoch_log_path, "a", encoding="utf-8") as f:
-                f.write("- " + json.dumps(clean) + "\n")
+                f.write(json.dumps(clean) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
         except Exception as e:
