@@ -19,6 +19,9 @@ from uer.model_saver import save_model
 from uer.opts import finetune_opts
 import tqdm
 import numpy as np
+import json
+import math
+import time
 
 class Classifier(nn.Module):
     def __init__(self, args):
@@ -382,37 +385,37 @@ def main():
 
     # -inf so the first epoch always saves, regardless of metric sign (in particular the
     # negated dev loss, which can be < -1).
-    total_loss, best_result = 0.0, float("-inf")
+    total_loss, best_result, best_epoch = 0.0, float("-inf"), 0
 
-    # MLflow integration: re-enter the parent's active run so autolog and
-    # per-epoch metrics are written to the same run on the shared Lustre store.
-    _mlflow_client = None
-    _mlflow_run_id = os.environ.get("MLFLOW_RUN_ID")
-    if _mlflow_run_id:
+    # Per-epoch metrics channel for the NTFM-OSfing pipeline. When the parent process sets
+    # OSFING_EPOCH_LOG, one record per epoch (plus a final {"kind": "summary"} record) is
+    # appended to that file as a YAML sequence item in flow style — `- ` + JSON, which is a
+    # YAML subset — with flush + fsync per line, so a killed job keeps every finished epoch.
+    # Metric names (train.loss / dev.accuracy / dev.f1_macro / dev.loss, 1-based epoch) match
+    # the netFound fork's EpochLogCallback. Dependency-free; no env var -> no-op.
+    _epoch_log_path = os.environ.get("OSFING_EPOCH_LOG")
+
+    def _append_epoch_record(record):
+        if not _epoch_log_path:
+            return
         try:
-            import atexit
-            import mlflow
-            import mlflow.pytorch
-            _mlflow_tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
-            if _mlflow_tracking_uri:
-                mlflow.set_tracking_uri(_mlflow_tracking_uri)
-            # Re-enter the parent process's run (same run_id, shared Lustre mlruns/).
-            mlflow.start_run(run_id=_mlflow_run_id)
-            # Prevent this subprocess from closing the run on exit — the parent
-            # process owns the run lifecycle and will call end_run() itself.
-            atexit.unregister(mlflow.end_run)
-            # Autolog: patches optimizer.step() to capture learning-rate schedule
-            # and gradient norms each step. log_models=False avoids uploading the
-            # .bin checkpoint as a large MLflow artifact (we manage paths manually).
-            mlflow.pytorch.autolog(log_models=False, silent=True)
-            _mlflow_client = mlflow.tracking.MlflowClient()
+            clean = {
+                k: (None if isinstance(v, float) and not math.isfinite(v) else v)
+                for k, v in record.items()
+            }
+            with open(_epoch_log_path, "a", encoding="utf-8") as f:
+                f.write("- " + json.dumps(clean) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
         except Exception as e:
-            print(f"[WARNING] MLflow per-epoch logging disabled: {e}")
+            print(f"[WARNING] could not append to OSFING_EPOCH_LOG ({_epoch_log_path}): {e}")
 
     print("Start training.")
+    train_t0 = time.time()
 
     for epoch in tqdm.tqdm(range(1, args.epochs_num + 1)):
         model.train()
+        epoch_t0 = time.time()
         epoch_loss, epoch_steps = 0.0, 0
         for i, (src_batch, tgt_batch, seg_batch, soft_tgt_batch) in enumerate(batch_loader(batch_size, src, tgt, seg, soft_tgt)):
             loss = train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_batch, soft_tgt_batch)
@@ -435,20 +438,53 @@ def main():
         else:
             selection_score = dev_accuracy
 
-        if _mlflow_client and _mlflow_run_id:
-            try:
-                avg_loss = epoch_loss / epoch_steps if epoch_steps > 0 else 0.0
-                _mlflow_client.log_metric(_mlflow_run_id, "train.loss", avg_loss, step=epoch)
-                _mlflow_client.log_metric(_mlflow_run_id, "dev.accuracy", dev_accuracy, step=epoch)
-                _mlflow_client.log_metric(_mlflow_run_id, "dev.f1_macro", dev_f1_macro, step=epoch)
-                _mlflow_client.log_metric(_mlflow_run_id, "dev.loss", dev_loss, step=epoch)
-            except Exception:
-                pass
+        # Epoch-mean training loss (the "Avg loss" printed every report_steps is a windowed
+        # value that straddles epoch boundaries; this is the per-epoch mean).
+        avg_loss = epoch_loss / epoch_steps if epoch_steps > 0 else 0.0
+        print(
+            "Epoch {} done: train.loss={:.4f} dev.accuracy={:.4f} dev.f1_macro={:.4f} "
+            "dev.loss={:.4f} ({:.0f} s)".format(
+                epoch, avg_loss, dev_accuracy, dev_f1_macro, dev_loss, time.time() - epoch_t0
+            )
+        )
+        _append_epoch_record({
+            "epoch": epoch,
+            "train.loss": float(avg_loss),
+            "dev.accuracy": float(dev_accuracy),
+            "dev.f1_macro": float(dev_f1_macro),
+            "dev.loss": float(dev_loss),
+            "train_steps": int(epoch_steps),
+            "elapsed_s": round(time.time() - epoch_t0, 3),
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+        })
 
         # Best-on-dev model selection by the configured metric (default f1_macro).
         if selection_score > best_result:
             best_result = selection_score
+            best_epoch = epoch
             save_model(model, args.output_model_path)
+
+    # Training summary for the pipeline's run log (the parent re-derives best_epoch from the
+    # per-epoch records and can cross-check it against this value). Peak GPU memory is
+    # measured HERE, in the process that actually trained.
+    summary = {
+        "kind": "summary",
+        "best_epoch": int(best_epoch),
+        "best_result": float(best_result),
+        "selection_metric": str(args.selection_metric),
+        "epochs_completed": int(args.epochs_num),
+        "instances_num": int(instances_num),
+        "train_steps": int(args.train_steps),
+        "labels_num": int(args.labels_num),
+        "device": str(args.device),
+        "train_runtime_s": round(time.time() - train_t0, 3),
+    }
+    try:
+        if torch.cuda.is_available():
+            summary["gpu.peak_memory_mb"] = float(torch.cuda.max_memory_allocated() / 1024 / 1024)
+    except Exception:
+        pass
+    _append_epoch_record(summary)
 
     # Evaluation phase.
     if args.test_path is not None:
